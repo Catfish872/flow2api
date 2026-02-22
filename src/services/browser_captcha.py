@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict
 from datetime import datetime
 from urllib.parse import urlparse, unquote
+import aiohttp
 
 from ..core.logger import debug_logger
 
@@ -351,59 +352,69 @@ class TokenBrowser:
         self._semaphore = asyncio.Semaphore(1)  # 同时只能有一个任务
         self._solve_count = 0
         self._error_count = 0
-    
-    async def _create_browser(self) -> tuple:
-        """创建新浏览器实例（新 UA），返回 (playwright, browser, context)"""
-        import random
-        
-        random_ua = random.choice(self.UA_LIST)
-        base_w, base_h = random.choice(self.RESOLUTIONS)
-        width, height = base_w, base_h - random.randint(0, 80)
-        viewport = {"width": width, "height": height}
-        
-        playwright = await async_playwright().start()
-        Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
-        
-        # 代理配置
-        proxy_option = None
+
+    async def _close_roxy_browser(self, profile_id: str):
+        """调用 Roxy API 彻底关闭窗口进程"""
+        close_url = "http://127.0.0.1:50000/browser/close"
+        headers = {
+            "token": "c1454d1ae361de8a818a8db8e265d46f",
+            "Content-Type": "application/json"
+        }
+        payload = {"dirId": profile_id}
+
         try:
-            if self.db:
-                captcha_config = await self.db.get_captcha_config()
-                raw_url = captcha_config.browser_proxy_enabled and captcha_config.browser_proxy_url
-                if raw_url:
-                    proxy_option = parse_proxy_url(raw_url.strip())
-                    if proxy_option:
-                        debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 使用代理: {proxy_option['server']}")
-        except: pass
-        
-        try:
-            browser = await playwright.chromium.launch(
-                headless=False,
-                proxy=proxy_option,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-setuid-sandbox',
-                    '--no-first-run',
-                    '--no-zygote',
-                    f'--window-size={width},{height}',
-                    '--disable-infobars',
-                    '--hide-scrollbars',
-                ]
-            )
-            context = await browser.new_context(
-                user_agent=random_ua,
-                viewport=viewport,
-            )
-            return playwright, browser, context
+            async with aiohttp.ClientSession() as session:
+                async with session.post(close_url, headers=headers, json=payload, timeout=5) as resp:
+                    res = await resp.json()
+                    if res.get("code") == 0:
+                        print(f"================= 7. Roxy 窗口 {profile_id} 已成功关闭 =================")
+                    else:
+                        print(f"================= 警告：窗口关闭失败: {res} =================")
         except Exception as e:
-            debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 启动浏览器失败: {type(e).__name__}: {str(e)[:200]}")
-            # 确保清理已创建的对象
-            try:
-                if playwright:
-                    await playwright.stop()
-            except: pass
+            print(f"================= 严重错误：无法连接到 Roxy 关闭接口: {e} =================")
+
+    async def _create_browser(self) -> tuple:
+        """接管指定的 RoxyBrowser 环境"""
+        print("================= 1. 准备接管 Roxy 流程 =================")
+        playwright = await async_playwright().start()
+
+        # 配置信息 (已根据您的要求硬编码)
+        roxy_token = "c1454d1ae361de8a818a8db8e265d46f"
+        profile_id = "ffec80442cd6e0930f6df16bafc29e74"
+
+        api_url = "http://127.0.0.1:50000/browser/open"
+        headers = {"token": roxy_token, "Content-Type": "application/json"}
+        payload = {"dirId": profile_id}
+
+        try:
+            print(f"================= 2. 发送请求开启窗口: {profile_id} =================")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, headers=headers, json=payload, timeout=15) as resp:
+                    res_json = await resp.json()
+                    print(f"================= 3. Roxy 返回: {res_json} =================")
+
+                    if res_json.get("code") != 0:
+                        raise Exception(f"Roxy启动拒绝: {res_json.get('msg')}")
+
+                    ws_endpoint = res_json["data"]["ws"]
+                    print(f"================= 4. 拿到 WS 地址: {ws_endpoint} =================")
+
+            print("================= 5. Playwright 正在连接 CDP... =================")
+            # 这里的 timeout 稍微拉长，防止接管慢
+            browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=30000)
+            print("================= 6. 接管成功！ =================")
+
+            # 接管已有浏览器时，使用现有的 context
+            if browser.contexts:
+                context = browser.contexts[0]
+            else:
+                context = await browser.new_context()
+
+            return playwright, browser, context
+
+        except Exception as e:
+            print(f"\n!!!!!!!!!!!!!!!!!! 致命错误: {e} !!!!!!!!!!!!!!!!!!\n")
+            if playwright: await playwright.stop()
             raise
     
     async def _close_browser(self, playwright, browser, context):
@@ -474,44 +485,47 @@ class TokenBrowser:
             if page:
                 try: await page.close()
                 except: pass
-    
+
     async def get_token(self, project_id: str, website_key: str, action: str = "IMAGE_GENERATION") -> Optional[str]:
-        """获取 Token：启动新浏览器 -> 打码 -> 关闭浏览器"""
+        """获取 Token：唤醒 -> 打码 -> 彻底杀掉进程"""
         async with self._semaphore:
-            MAX_RETRIES = 3
-            
+            MAX_RETRIES = 2  # 24x7 场景建议减少重试，防止卡死
+            roxy_token = "c1454d1ae361de8a818a8db8e265d46f"
+            profile_id = "ffec80442cd6e0930f6df16bafc29e74"
+
             for attempt in range(MAX_RETRIES):
-                playwright = None
-                browser = None
-                context = None
+                playwright, browser, context = None, None, None
                 try:
-                    start_ts = time.time()
-                    
-                    # 每次都启动新浏览器（新 UA）
+                    # 1. 唤醒并接管
                     playwright, browser, context = await self._create_browser()
-                    
-                    # 执行打码
+
+                    # 2. 执行打码逻辑
                     token = await self._execute_captcha(context, project_id, website_key, action)
-                    
+
                     if token:
-                        self._solve_count += 1
-                        debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 获取成功 ({(time.time()-start_ts)*1000:.0f}ms)")
+                        debug_logger.log_info(f"[BrowserCaptcha] Token 产出成功")
                         return token
-                    
-                    self._error_count += 1
-                    debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 尝试 {attempt+1}/{MAX_RETRIES} 失败")
-                    
+
                 except Exception as e:
-                    self._error_count += 1
-                    debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 浏览器错误: {type(e).__name__}: {str(e)[:200]}")
+                    debug_logger.log_error(f"[BrowserCaptcha] 运行异常: {e}")
                 finally:
-                    # 无论成功失败都关闭浏览器
-                    await self._close_browser(playwright, browser, context)
-                
-                # 重试前等待
+                    # --- 彻底清理现场 ---
+                    try:
+                        if browser: await browser.close()
+                        if playwright: await playwright.stop()
+
+                        # 调用 Roxy 接口关闭窗口进程 (关键！)
+                        close_url = "http://127.0.0.1:50000/browser/close"
+                        async with aiohttp.ClientSession() as session:
+                            await session.post(close_url,
+                                               headers={"token": roxy_token},
+                                               json={"dirId": profile_id})
+                        print(f"================= 7. 窗口 {profile_id} 已彻底关闭进程 =================")
+                    except:
+                        pass
+
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1)
-            
+                    await asyncio.sleep(2)
             return None
     
 
@@ -688,8 +702,25 @@ class BrowserCaptchaService:
                 self._browsers.pop(browser_id)
 
     async def close(self):
-        async with self._browsers_lock:
-            self._browsers.clear()
+        """释放资源并彻底关闭 RoxyBrowser"""
+        try:
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+
+            # ------ 增加调用 Roxy 的关闭接口 ------
+            api_url = "http://127.0.0.1:50000/browser/close"
+            headers = {"token": "c1454d1ae361de8a818a8db8e265d46f", "Content-Type": "application/json"}
+            payload = {"dirId": "ffec80442cd6e0930f6df16bafc29e74"}  # 需与上面一致
+
+            async with aiohttp.ClientSession() as session:
+                await session.post(api_url, headers=headers, json=payload)
+            debug_logger.log_info("[BrowserCaptcha] 已通过 API 彻底关闭 RoxyBrowser 进程")
+            # -------------------------------------
+
+        except Exception as e:
+            debug_logger.log_error(f"[BrowserCaptcha] 关闭浏览器环境失败: {e}")
             
     async def open_login_browser(self): return {"success": False, "error": "Not implemented"}
     async def create_browser_for_token(self, t, s=None): pass

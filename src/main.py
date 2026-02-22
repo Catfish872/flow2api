@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pathlib import Path
+import random
 
 from .core.config import config
 from .core.database import Database
@@ -46,7 +47,7 @@ def auto_open_project_pages():
             print(f"❌ [错误] 找不到 Edge 路径: {edge_path}")
             return
 
-        profile_dir = "Profile 1"  # 请务必确认此名在 edge://version 中完全一致
+        profile_dir = "Profile 2"  # 请务必确认此名在 edge://version 中完全一致
 
         for p_id in project_ids:
             url = f"https://labs.google/fx/tools/flow/project/{p_id}"
@@ -176,6 +177,30 @@ async def lifespan(app: FastAPI):
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
 
+    async def auto_restart_edge_task():
+        """每 50-70 分钟检测一次，如果空闲则重启浏览器"""
+        while True:
+            try:
+                # 随机等待 50-70 分钟，避免固定点刷新被风控
+                wait_seconds = random.randint(3000, 4200)
+                await asyncio.sleep(wait_seconds)
+
+                # 只有在没有活跃生成任务时才重启，避免打断正在进行的生成
+                if concurrency_manager.get_active_count() == 0:
+                    print("🔄 [维护] 环境已进入空闲期，正在重启 Edge 以维持 Session 活力...")
+                    # 强杀 Edge 进程
+                    subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"], capture_output=True)
+                    await asyncio.sleep(5)  # 等待进程彻底清理
+                    # 调用你原本就有的启动函数
+                    auto_open_project_pages()
+                else:
+                    print("⏳ [维护] 检测到正在处理请求，推迟 5 分钟后再次尝试重启...")
+                    await asyncio.sleep(300)  # 忙碌则 5 分钟后再看
+            except Exception as e:
+                print(f"❌ [重启任务错误]: {e}")
+
+    restart_task_handle = asyncio.create_task(auto_restart_edge_task())
+
     print(f"✓ Database initialized")
     print(f"✓ Total tokens: {len(tokens)}")
     print(f"✓ Cache: {'Enabled' if config.cache_enabled else 'Disabled'} (timeout: {config.cache_timeout}s)")
@@ -191,6 +216,7 @@ async def lifespan(app: FastAPI):
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
     # Stop auto-unban task
+    restart_task_handle.cancel()
     auto_unban_task_handle.cancel()
     try:
         await auto_unban_task_handle
