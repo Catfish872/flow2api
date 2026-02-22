@@ -1410,6 +1410,7 @@ class FlowClient:
 
                 debug_logger.log_error(f"[reCAPTCHA {method}] Timeout waiting for token")
                 return None
+                #
 
         except Exception as e:
             debug_logger.log_error(f"[reCAPTCHA {method}] error: {str(e)}")
