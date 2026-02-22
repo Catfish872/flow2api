@@ -1,5 +1,5 @@
 """API routes - OpenAI compatible endpoints"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException,Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import List, Optional
 import base64
@@ -12,6 +12,7 @@ from ..core.auth import verify_api_key_header
 from ..core.models import ChatCompletionRequest
 from ..services.generation_handler import GenerationHandler, MODEL_CONFIG
 from ..core.logger import debug_logger
+from ..services.flow_client import TM_TASKS, TM_RESULTS
 
 router = APIRouter()
 
@@ -170,6 +171,31 @@ async def create_chat_completion(
                                 debug_logger.log_error(f"[CONTEXT] 处理参考图时出错: {str(e)}")
                                 # 继续尝试下一个图片
 
+        history_parts = []
+        # 遍历除了最后一条之外的所有历史消息
+        for msg in request.messages[:-1]:
+            text = ""
+            # 兼容纯文本和多模态数组结构
+            if isinstance(msg.content, str):
+                text = msg.content
+            elif isinstance(msg.content, list):
+                text = "".join([item.get("text", "") for item in msg.content if item.get("type") == "text"])
+
+            if text.strip():
+                if msg.role == "system":
+                    history_parts.append(f"[System Instruction]: {text.strip()}")
+                elif msg.role == "user":
+                    history_parts.append(f"[User]: {text.strip()}")
+                elif msg.role == "assistant":
+                    # 过滤掉 Assistant 历史回复中带有的 Markdown 图片链接，防止污染文本提示词
+                    clean_text = re.sub(r"!\[.*?\]\(.*?\)", "", text).strip()
+                    if clean_text:
+                        history_parts.append(f"[Assistant]: {clean_text}")
+
+        # 如果存在历史记录或系统提示，将它们拼接在当前请求的最前面
+        if history_parts:
+            history_text = "\n".join(history_parts)
+            prompt = f"{history_text}\n\n[Current Request]: {prompt}"
         if not prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
@@ -223,3 +249,23 @@ async def create_chat_completion(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tm/task")
+async def get_tm_task(project_id: str):
+    """油猴脚本来要任务的接口"""
+    for tid, task in list(TM_TASKS.items()):
+        if task["project_id"] == project_id:
+            del TM_TASKS[tid]  # 取出后立刻从队列删除
+            return JSONResponse(task)
+    return JSONResponse({"task_id": None})
+
+
+@router.post("/tm/result")
+async def submit_tm_result(request: Request):
+    """油猴脚本交作业的接口"""
+    data = await request.json()
+    task_id = data.get("task_id")
+    if task_id:
+        TM_RESULTS[task_id] = data
+    return JSONResponse({"status": "ok"})

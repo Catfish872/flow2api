@@ -15,11 +15,59 @@ from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
 from .api import routes, admin
+import webbrowser
+import sqlite3
+import asyncio
+from threading import Timer
+import os
+import subprocess
+
+
+def auto_open_project_pages():
+    print("⏳ [诊断] 正在尝试读取数据库...")
+    try:
+        # 增加 check_same_thread=False 防止多线程冲突
+        with sqlite3.connect('data/flow.db', check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT current_project_id FROM tokens WHERE is_active = 1")
+            rows = cursor.fetchall()
+            project_ids = [row[0] for row in rows if row[0]]
+
+        print(f"🔎 [诊断] 数据库扫描完成，找到活跃 ID 数量: {len(project_ids)}")
+
+        if not project_ids:
+            print("⚠️ [警告] 数据库中没有 status 为 'active' 的项目，请检查 Token 列表！")
+            return
+
+        edge_path = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+        # 确认文件是否存在
+        if not os.path.exists(edge_path):
+            print(f"❌ [错误] 找不到 Edge 路径: {edge_path}")
+            return
+
+        profile_dir = "Profile 1"  # 请务必确认此名在 edge://version 中完全一致
+
+        for p_id in project_ids:
+            url = f"https://labs.google/fx/tools/flow/project/{p_id}"
+            # 增加 --no-first-run 减少弹窗干扰
+            cmd = f'"{edge_path}" --profile-directory="{profile_dir}" --no-first-run "{url}"'
+            print(f"🚀 [执行] 正在启动命令: {cmd}")
+            subprocess.Popen(cmd, shell=True)
+
+    except Exception as e:
+        print(f"🚨 [崩溃] 自动启动逻辑出错: {str(e)}")
+
+
+def start_auto_open():
+    print("🔔 [系统] 5秒后将自动触发浏览器注入...")
+    Timer(5, auto_open_project_pages).start()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    start_auto_open()
     # Startup
     print("=" * 60)
     print("Flow2API Starting...")
@@ -184,13 +232,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+@app.on_event("startup")
+async def startup_event():
+    # 启动自动打开任务
+    start_auto_open()
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # 允许所有来源，包括 google.com
     allow_credentials=True,
-    allow_methods=["*"],
     allow_headers=["*"],
+    allow_methods=["*"],
 )
 
 # Include routers

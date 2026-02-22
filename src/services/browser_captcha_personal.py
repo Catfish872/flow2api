@@ -219,11 +219,70 @@ class BrowserCaptchaService:
 
             self._initialized = True
             debug_logger.log_info(f"[BrowserCaptcha] ✅ nodriver 浏览器已启动 (Profile: {self.user_data_dir})")
+            # asyncio.create_task(self._periodic_surgical_clean())
 
         except Exception as e:
             debug_logger.log_error(f"[BrowserCaptcha] ❌ 浏览器启动失败: {str(e)}")
             raise
 
+    async def _periodic_surgical_clean(self):
+        """后台定时执行外科手术式防风控清理与养号保活"""
+        try:
+            from nodriver.cdp import network
+            import random
+        except ImportError:
+            return
+
+        while True:
+            # 每 10 分钟 (600秒) 执行一次。您可以根据实际掉签频率调整为 300 或 1200
+            await asyncio.sleep(180)
+
+            # 如果浏览器已关闭或实例被销毁，自动结束此后台任务，防止内存泄漏
+            if getattr(self, 'browser', None) is None or self.browser.stopped:
+                break
+
+            try:
+                debug_logger.log_info("[Anti-Risk] 🧹 开始执行后台定时防风控清理...")
+                tab = self.browser.main_tab
+                if not tab: continue
+
+                # 动作 1：清空底层网络缓存
+                try:
+                    await tab.send(network.clear_browser_cache())
+                except Exception:
+                    pass
+
+                # 动作 2：精准剔除 reCAPTCHA 和 Google 的机器追踪 Cookie
+                tracking_targets = [
+                    {"name": "_GRECAPTCHA", "domain": ".recaptcha.net"},
+                    {"name": "_GRECAPTCHA", "domain": ".google.com"},
+                    {"name": "NID", "domain": ".google.com"},
+                    {"name": "AEC", "domain": ".google.com"}
+                ]
+                for target in tracking_targets:
+                    try:
+                        await tab.send(network.delete_cookies(name=target["name"], domain=target["domain"]))
+                    except Exception:
+                        pass
+
+                # 动作 3：遍历所有常驻的打码标签页，清理存储并模拟真人互动
+                async with self._resident_lock:
+                    for pid, resident_info in list(self._resident_tabs.items()):
+                        if resident_info and resident_info.tab:
+                            try:
+                                rtab = resident_info.tab
+                                # 清空该项目页面的风控暗记
+                                await rtab.evaluate("localStorage.clear(); sessionStorage.clear();")
+
+                                # 💡 额外养号加分项：顺手在页面上随机滚动一下，骗过防静止检测
+                                scroll_y = random.randint(100, 400)
+                                await rtab.evaluate(f"window.scrollBy(0, {scroll_y});")
+                            except Exception:
+                                pass
+
+                debug_logger.log_info("[Anti-Risk] ✅ 定时清理及真人保活完毕，当前登录态健康。")
+            except Exception as e:
+                debug_logger.log_warning(f"[Anti-Risk] 后台定时清理任务遭遇轻微异常: {e}")
     # ========== 常驻模式 API ==========
 
     async def start_resident_mode(self, project_id: str):
@@ -560,7 +619,7 @@ class BrowserCaptchaService:
 
     async def _close_resident_tab(self, project_id: str):
         """关闭指定 project_id 的常驻标签页
-        
+
         Args:
             project_id: 项目 ID
         """

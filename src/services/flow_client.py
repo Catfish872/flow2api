@@ -10,6 +10,9 @@ from ..core.logger import debug_logger
 from ..core.config import config
 import json
 
+TM_TASKS = {}
+TM_RESULTS = {}
+
 
 class FlowClient:
     """VideoFX API客户端"""
@@ -62,41 +65,78 @@ class FlowClient:
 
             # 【核心修复】：在 JS 端使用 JSON.stringify 强制把结果变成纯字符串
             js_code = f"""
-                (() => {{
-                    window.{result_var} = null;
-                    window.{error_var} = null;
+                            (() => {{
+                                window.{result_var} = null;
+                                window.{error_var} = null;
 
-                    (async () => {{
-                        try {{
-                            const response = await fetch('{url}', {{
-                                method: 'POST',
-                                headers: {{
-                                    'Authorization': 'Bearer {at_token}',
-                                    'Content-Type': 'application/json'
-                                }},
-                                body: {safe_js_string}
-                            }});
+                                (async () => {{
+                                    try {{
+                                        // --- 高级拟人化模块 START ---
+                                        // 1. 模拟鼠标平滑移动 (分多步产生轨迹，而不是瞬间瞬移)
+                                        const steps = 15 + Math.floor(Math.random() * 10); // 15-25 个移动轨迹点
+                                        let currentX = window.innerWidth / 2;
+                                        let currentY = window.innerHeight / 2;
+                                        const targetX = currentX + (Math.random() * 300 - 150);
+                                        const targetY = currentY + (Math.random() * 300 - 150);
 
-                            const text = await response.text();
-                            let responseData = null;
-                            try {{
-                                responseData = JSON.parse(text);
-                            }} catch (e) {{
-                                responseData = text;
-                            }}
+                                        for(let i = 1; i <= steps; i++) {{
+                                            const t = i / steps;
+                                            // 简单的缓动算法 (Ease-out)，模拟人手先快后慢
+                                            const easeT = 1 - Math.pow(1 - t, 3); 
+                                            const x = currentX + (targetX - currentX) * easeT;
+                                            const y = currentY + (targetY - currentY) * easeT;
 
-                            // ！！！这里是降维打击：强转为字符串，阻断 nodriver 的错误类型推导 ！！！
-                            window.{result_var} = JSON.stringify({{ 
-                                success: response.ok, 
-                                status: response.status, 
-                                data: responseData 
-                            }});
-                        }} catch (e) {{
-                            window.{error_var} = e.toString();
-                        }}
-                    }})();
-                }})()
-            """
+                                            document.body.dispatchEvent(new MouseEvent('mousemove', {{
+                                                bubbles: true,
+                                                clientX: x,
+                                                clientY: y,
+                                                movementX: (targetX - currentX) / steps,
+                                                movementY: (targetY - currentY) / steps
+                                            }}));
+                                            // 每个轨迹点之间间隔 10~30 毫秒，符合真实显示器刷新率
+                                            await new Promise(r => setTimeout(r, 10 + Math.random() * 20));
+                                        }}
+
+                                        // 2. 真实平滑滚动
+                                        window.scrollBy({{
+                                            top: Math.floor(Math.random() * 200) - 100,
+                                            left: 0,
+                                            behavior: 'smooth' // 浏览器原生平滑滚动
+                                        }});
+
+                                        // 3. 阅读/思考延迟：拉长到 800 - 1800 毫秒
+                                        await new Promise(r => setTimeout(r, 800 + Math.random() * 1000));
+                                        // --- 高级拟人化模块 END ---
+
+                                        // 发起请求
+                                        const response = await fetch('{url}', {{
+                                            method: 'POST',
+                                            headers: {{
+                                                'Authorization': 'Bearer {at_token}',
+                                                'Content-Type': 'application/json'
+                                            }},
+                                            body: {safe_js_string}
+                                        }});
+
+                                        const text = await response.text();
+                                        let responseData = null;
+                                        try {{
+                                            responseData = JSON.parse(text);
+                                        }} catch (e) {{
+                                            responseData = text;
+                                        }}
+
+                                        window.{result_var} = JSON.stringify({{ 
+                                            success: response.ok, 
+                                            status: response.status, 
+                                            data: responseData 
+                                        }});
+                                    }} catch (e) {{
+                                        window.{error_var} = e.toString();
+                                    }}
+                                }})();
+                            }})()
+                        """
 
             if config.debug_enabled:
                 debug_logger.log_info(f"[Browser Fetch] 正在通过浏览器底层发起请求...")
@@ -271,6 +311,55 @@ class FlowClient:
         # Add default Chromium/Android client headers (do not override explicitly provided values).
         for key, value in self._default_client_headers.items():
             headers.setdefault(key, value)
+
+        is_tm_task = False
+        tm_action = None
+        if config.captcha_method == "tampermonkey" and json_data:
+            token = json_data.get("clientContext", {}).get("recaptchaContext", {}).get("token", "")
+            if token.startswith("TM_INJECT_"):
+                is_tm_task = True
+                tm_action = token.replace("TM_INJECT_", "")
+
+        if is_tm_task:
+            import re
+            project_id_match = re.search(r'/projects/([^/:]+)', url)
+            p_id = project_id_match.group(1) if project_id_match else "default"
+
+            task_id = str(uuid.uuid4())
+            TM_TASKS[task_id] = {
+                "task_id": task_id,
+                "project_id": p_id,
+                "action": tm_action,
+                "url": url,
+                "method": method,
+                "headers": headers,
+                "body": json_data
+            }
+
+            # 这里的打印会出现在你运行 Python 的终端里
+            print(f"\n[🚀 TM 任务入队] ID: {task_id[:8]} | 项目: {p_id} | 类型: {tm_action}")
+            debug_logger.log_info(f"[TM Bridge] 任务 {task_id[:8]} 已入队，等待油猴认领...")
+
+            wait_time = 0
+            while wait_time < request_timeout:
+                if task_id in TM_RESULTS:
+                    res = TM_RESULTS.pop(task_id)
+                    print(f"[✅ TM 任务完成] ID: {task_id[:8]} | 状态码: {res.get('status')}")
+                    if res.get("status") >= 400:
+                        raise Exception(f"TM HTTP Error {res.get('status')}: {res.get('data')}")
+                    return res.get("data")
+
+                # 每 5 秒在控制台刷一下存在感，防止你以为卡死了
+                if wait_time % 5 == 0 and wait_time > 0:
+                    print(f"  ... 任务 {task_id[:8]} 等待中 ({wait_time}s/{request_timeout}s)")
+
+                await asyncio.sleep(1)
+                wait_time += 1
+
+            if task_id in TM_TASKS:
+                del TM_TASKS[task_id]
+            print(f"[❌ TM 任务超时] ID: {task_id[:8]}")
+            raise Exception("油猴请求超时！请检查浏览器标签页是否存活。")
 
         # Log request
         if config.debug_enabled:
@@ -662,7 +751,7 @@ class FlowClient:
                 retry_reason = self._get_retry_reason(error_str)
                 if retry_reason and retry_attempt < max_retries - 1:
                     debug_logger.log_warning(f"[IMAGE] 生成遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})...")
-                    await self._notify_browser_captcha_error(browser_id)
+                    await self._notify_browser_captcha_error(browser_id, project_id=project_id)
                     await asyncio.sleep(1)
                     continue
                 else:
@@ -808,7 +897,7 @@ class FlowClient:
                 retry_reason = self._get_retry_reason(error_str)
                 if retry_reason and retry_attempt < max_retries - 1:
                     debug_logger.log_warning(f"[VIDEO T2V] 生成遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})...")
-                    await self._notify_browser_captcha_error(browser_id)
+                    await self._notify_browser_captcha_error(browser_id, project_id=project_id)
                     await asyncio.sleep(1)
                     continue
                 else:
@@ -895,7 +984,7 @@ class FlowClient:
                 retry_reason = self._get_retry_reason(error_str)
                 if retry_reason and retry_attempt < max_retries - 1:
                     debug_logger.log_warning(f"[VIDEO R2V] 生成遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})...")
-                    await self._notify_browser_captcha_error(browser_id)
+                    await self._notify_browser_captcha_error(browser_id, project_id=project_id)
                     await asyncio.sleep(1)
                     continue
                 else:
@@ -989,7 +1078,7 @@ class FlowClient:
                 retry_reason = self._get_retry_reason(error_str)
                 if retry_reason and retry_attempt < max_retries - 1:
                     debug_logger.log_warning(f"[VIDEO I2V] 首尾帧生成遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})...")
-                    await self._notify_browser_captcha_error(browser_id)
+                    await self._notify_browser_captcha_error(browser_id, project_id=project_id)
                     await asyncio.sleep(1)
                     continue
                 else:
@@ -1079,7 +1168,7 @@ class FlowClient:
                 retry_reason = self._get_retry_reason(error_str)
                 if retry_reason and retry_attempt < max_retries - 1:
                     debug_logger.log_warning(f"[VIDEO I2V] 首帧生成遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})...")
-                    await self._notify_browser_captcha_error(browser_id)
+                    await self._notify_browser_captcha_error(browser_id, project_id=project_id)
                     await asyncio.sleep(1)
                     continue
                 else:
@@ -1162,7 +1251,7 @@ class FlowClient:
                 retry_reason = self._get_retry_reason(error_str)
                 if retry_reason and retry_attempt < max_retries - 1:
                     debug_logger.log_warning(f"[VIDEO UPSAMPLE] 放大遇到{retry_reason}，正在重新获取验证码重试 ({retry_attempt + 2}/{max_retries})...")
-                    await self._notify_browser_captcha_error(browser_id)
+                    await self._notify_browser_captcha_error(browser_id, project_id=project_id)
                     await asyncio.sleep(1)
                     continue
                 else:
@@ -1243,17 +1332,23 @@ class FlowClient:
             return "reCAPTCHA 错误"
         return None
 
-    async def _notify_browser_captcha_error(self, browser_id: int = None):
-        """通知有头浏览器打码切换指纹（仅当使用 browser 打码方式时）
-        
-        Args:
-            browser_id: 要标记为 bad 的浏览器 ID
-        """
+    async def _notify_browser_captcha_error(self, browser_id: int = None, project_id: str = None):
+        """通知打码服务切换指纹或销毁被污染的标签页"""
         if config.captcha_method == "browser":
             try:
                 from .browser_captcha import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
                 await service.report_error(browser_id)
+            except Exception:
+                pass
+        # 增加对 personal 模式的处理
+        elif config.captcha_method == "personal" and project_id:
+            try:
+                # 遇到 403 时，果断杀掉这个被风控的标签页，重试时会自动开新页！
+                from .browser_captcha_personal import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                await service._close_resident_tab(project_id)
+                debug_logger.log_info(f"[Anti-Risk] 已销毁信誉受损的常驻标签页: {project_id}")
             except Exception:
                 pass
 
@@ -1266,19 +1361,12 @@ class FlowClient:
         return str(uuid.uuid4())
 
     async def _get_recaptcha_token(self, project_id: str, action: str = "IMAGE_GENERATION") -> tuple[Optional[str], Optional[int]]:
-        """获取reCAPTCHA token - 支持多种打码方式
-        
-        Args:
-            project_id: 项目ID
-            action: reCAPTCHA action类型
-                - IMAGE_GENERATION: 图片生成和2K/4K图片放大 (默认)
-                - VIDEO_GENERATION: 视频生成和视频放大
-        
-        Returns:
-            (token, browser_id) 元组，browser_id 用于失败时调用 report_error
-            对于非 browser 打码方式，browser_id 为 None
-        """
+        """获取reCAPTCHA token - 支持多种打码方式"""
         captcha_method = config.captcha_method
+
+        # 💥 新增：油猴模式直接返回一个占位符，交给后续拦截
+        if captcha_method == "tampermonkey":
+            return f"TM_INJECT_{action}", None
 
         # 内置浏览器打码 (nodriver)
         if captcha_method == "personal":
@@ -1410,7 +1498,6 @@ class FlowClient:
 
                 debug_logger.log_error(f"[reCAPTCHA {method}] Timeout waiting for token")
                 return None
-                #
 
         except Exception as e:
             debug_logger.log_error(f"[reCAPTCHA {method}] error: {str(e)}")
