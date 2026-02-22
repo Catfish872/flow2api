@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config
+import json
 
 
 class FlowClient:
@@ -36,6 +37,112 @@ class FlowClient:
             "x-browser-year": "2026",
             "x-client-data": "CJS2yQEIpLbJAQipncoBCNj9ygEIlKHLAQiFoM0BGP6lzwE="
         }
+
+    async def _make_browser_request(self, project_id: str, url: str, json_data: dict, at_token: str) -> dict:
+        """通过常驻的真实浏览器标签页发起底层 fetch 请求，实现 100% 真实指纹"""
+        from .browser_captcha_personal import BrowserCaptchaService
+        import json  # Python 原生自带库，绝对安全不报错
+
+        try:
+            captcha_service = await BrowserCaptchaService.get_instance(self.db)
+            resident_info = captcha_service._resident_tabs.get(project_id)
+            if not resident_info or not resident_info.tab:
+                raise Exception(f"找不到 project_id={project_id} 的常驻标签页。")
+
+            tab = resident_info.tab
+
+            # 双重 JSON 序列化，确保注入的安全
+            json_str = json.dumps(json_data)
+            safe_js_string = json.dumps(json_str)
+
+            # 使用时间戳生成唯一的变量名
+            ts = int(time.time() * 1000)
+            result_var = f"_fetch_result_{ts}"
+            error_var = f"_fetch_error_{ts}"
+
+            # 【核心修复】：在 JS 端使用 JSON.stringify 强制把结果变成纯字符串
+            js_code = f"""
+                (() => {{
+                    window.{result_var} = null;
+                    window.{error_var} = null;
+
+                    (async () => {{
+                        try {{
+                            const response = await fetch('{url}', {{
+                                method: 'POST',
+                                headers: {{
+                                    'Authorization': 'Bearer {at_token}',
+                                    'Content-Type': 'application/json'
+                                }},
+                                body: {safe_js_string}
+                            }});
+
+                            const text = await response.text();
+                            let responseData = null;
+                            try {{
+                                responseData = JSON.parse(text);
+                            }} catch (e) {{
+                                responseData = text;
+                            }}
+
+                            // ！！！这里是降维打击：强转为字符串，阻断 nodriver 的错误类型推导 ！！！
+                            window.{result_var} = JSON.stringify({{ 
+                                success: response.ok, 
+                                status: response.status, 
+                                data: responseData 
+                            }});
+                        }} catch (e) {{
+                            window.{error_var} = e.toString();
+                        }}
+                    }})();
+                }})()
+            """
+
+            if config.debug_enabled:
+                debug_logger.log_info(f"[Browser Fetch] 正在通过浏览器底层发起请求...")
+
+            # 发射请求
+            await tab.evaluate(js_code)
+
+            # 轮询等待结果（最长等待 60 秒）
+            result_str = None
+            error = None
+            for _ in range(120):
+                await asyncio.sleep(0.5)
+                result_str = await tab.evaluate(f"window.{result_var}")
+                if result_str:
+                    break
+                error = await tab.evaluate(f"window.{error_var}")
+                if error:
+                    break
+
+            # 过河拆桥，清理污染
+            try:
+                await tab.evaluate(f"delete window.{result_var}; delete window.{error_var};")
+            except:
+                pass
+
+            # 研判结果
+            if error:
+                raise Exception(f"浏览器 fetch 底层报错: {error}")
+
+            if not result_str:
+                raise Exception("浏览器 fetch 请求超时 (60秒内无响应)。")
+
+            # 【核心修复】：在 Python 端解包我们自己传过来的纯字符串，此时必定是一个完美的 dict
+            result = json.loads(result_str)
+
+            if result.get("success"):
+                return result.get("data")
+            else:
+                error_msg = result.get('data') or result.get('error')
+                status = result.get('status', 'Unknown')
+                raise Exception(f"HTTP Error {status}: {error_msg}")
+
+        except Exception as e:
+            # 直接使用文件顶部已经引用的 debug_logger，坚决不再瞎 import
+            debug_logger.log_error(f"[Browser Fetch Failed] {str(e)}")
+            raise e
 
     def _generate_user_agent(self, account_id: str = None) -> str:
         """基于账号ID生成固定的 User-Agent
@@ -532,13 +639,22 @@ class FlowClient:
             }
 
             try:
-                result = await self._make_request(
-                    method="POST",
-                    url=url,
-                    json_data=json_data,
-                    use_at=True,
-                    at_token=at
-                )
+                # 关键分流逻辑
+                if config.captcha_method == "personal":
+                    result = await self._make_browser_request(
+                        project_id=project_id,
+                        url=url,
+                        json_data=json_data,
+                        at_token=at
+                    )
+                else:
+                    result = await self._make_request(
+                        method="POST",
+                        url=url,
+                        json_data=json_data,
+                        use_at=True,
+                        at_token=at
+                    )
                 return result
             except Exception as e:
                 error_str = str(e)
