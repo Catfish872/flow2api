@@ -24,6 +24,35 @@ import os
 import subprocess
 
 
+async def auto_restart_edge_task():
+    """定时维护任务：极简模式，到点强制重启，依赖请求重试机制兜底"""
+    print("🚀 [系统] 浏览器自动重启维护任务已启动 (极简强制模式)...")
+
+    while True:
+        try:
+            # 1. 随机等待 50-70 分钟
+            wait_seconds = random.randint(3000, 4200)
+            print(f"⏱️ [维护] 下次 Edge 强制重启将在 {wait_seconds // 60} 分钟后执行...")
+            await asyncio.sleep(wait_seconds)
+
+            # 2. 到点直接强杀（不判断活跃数，直接重启）
+            print("🔄 [维护] 维护时间到，正在强制重启 Edge 以维持 Session 活力...")
+            if os.name == 'nt':  # Windows 环境
+                subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"], capture_output=True)
+
+            await asyncio.sleep(5)  # 等待进程彻底清理
+
+            # 3. 重新调用页面注入
+            auto_open_project_pages()
+            print("✅ [维护] Edge 进程已强制刷新并重新注入")
+
+        except asyncio.CancelledError:
+            # 正常关闭信号
+            print("🛑 [维护] 接收到关闭信号，重启任务安全退出。")
+            break
+        except Exception as e:
+            print(f"❌ [重启维护异常]: {e}")
+            await asyncio.sleep(60)  # 报错缓冲
 def auto_open_project_pages():
     print("⏳ [诊断] 正在尝试读取数据库...")
     try:
@@ -64,10 +93,10 @@ def start_auto_open():
     print("🔔 [系统] 5秒后将自动触发浏览器注入...")
     Timer(5, auto_open_project_pages).start()
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    restart_task_handle = asyncio.create_task(auto_restart_edge_task())
     start_auto_open()
     # Startup
     print("=" * 60)
@@ -165,7 +194,6 @@ async def lifespan(app: FastAPI):
     await generation_handler.file_cache.start_cleanup_task()
 
     # Start 429 auto-unban task
-    import asyncio
     async def auto_unban_task():
         """定时任务：每小时检查并解禁429被禁用的token"""
         while True:
@@ -177,29 +205,6 @@ async def lifespan(app: FastAPI):
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
 
-    async def auto_restart_edge_task():
-        """每 50-70 分钟检测一次，如果空闲则重启浏览器"""
-        while True:
-            try:
-                # 随机等待 50-70 分钟，避免固定点刷新被风控
-                wait_seconds = random.randint(3000, 4200)
-                await asyncio.sleep(wait_seconds)
-
-                # 只有在没有活跃生成任务时才重启，避免打断正在进行的生成
-                if concurrency_manager.get_active_count() == 0:
-                    print("🔄 [维护] 环境已进入空闲期，正在重启 Edge 以维持 Session 活力...")
-                    # 强杀 Edge 进程
-                    subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"], capture_output=True)
-                    await asyncio.sleep(5)  # 等待进程彻底清理
-                    # 调用你原本就有的启动函数
-                    auto_open_project_pages()
-                else:
-                    print("⏳ [维护] 检测到正在处理请求，推迟 5 分钟后再次尝试重启...")
-                    await asyncio.sleep(300)  # 忙碌则 5 分钟后再看
-            except Exception as e:
-                print(f"❌ [重启任务错误]: {e}")
-
-    restart_task_handle = asyncio.create_task(auto_restart_edge_task())
 
     print(f"✓ Database initialized")
     print(f"✓ Total tokens: {len(tokens)}")
@@ -213,6 +218,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     print("Flow2API Shutting down...")
+    restart_task_handle.cancel()
+    try:
+        await restart_task_handle
+    except asyncio.CancelledError:
+        pass
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
     # Stop auto-unban task
