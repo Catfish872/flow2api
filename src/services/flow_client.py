@@ -13,6 +13,12 @@ import json
 TM_TASKS = {}
 TM_RESULTS = {}
 
+def _pp(obj, limit=4000):
+    """把对象 pretty-print，太长就截断，避免终端爆炸"""
+    s = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+    if len(s) > limit:
+        return s[:limit] + f"\n... (truncated, total {len(s)} chars)"
+    return s
 
 class FlowClient:
     """VideoFX API客户端"""
@@ -604,35 +610,58 @@ class FlowClient:
         return output.getvalue()
 
     async def upload_image(
-        self,
-        at: str,
-        image_bytes: bytes,
-        aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE"
+            self,
+            at: str,
+            image_bytes: bytes,
+            aspect_ratio: str = "IMAGE_ASPECT_RATIO_LANDSCAPE",
+            project_id: Optional[str] = None
     ) -> str:
-        """上传图片,返回mediaGenerationId
-
-        Args:
-            at: Access Token
-            image_bytes: 图片字节数据
-            aspect_ratio: 图片或视频宽高比（会自动转换为图片格式）
-
-        Returns:
-            mediaGenerationId (CAM...)
-        """
-        # 转换视频aspect_ratio为图片aspect_ratio
-        # VIDEO_ASPECT_RATIO_LANDSCAPE -> IMAGE_ASPECT_RATIO_LANDSCAPE
-        # VIDEO_ASPECT_RATIO_PORTRAIT -> IMAGE_ASPECT_RATIO_PORTRAIT
+        """上传图片,返回mediaId"""
         if aspect_ratio.startswith("VIDEO_"):
             aspect_ratio = aspect_ratio.replace("VIDEO_", "IMAGE_")
 
-        # 自动检测图片 MIME 类型
         mime_type = self._detect_image_mime_type(image_bytes)
-
-        # 编码为base64 (去掉前缀)
         image_base64 = base64.b64encode(image_bytes).decode('utf-8')
 
-        url = f"{self.api_base_url}:uploadUserImage"
-        json_data = {
+        # 优先尝试新版上传接口 (关键点：必须传入 project_id 才能成功获取新版 ID)
+        if project_id:
+            ext = "png" if "png" in mime_type else "jpg"
+            upload_file_name = f"flow2api_upload_{int(time.time() * 1000)}.{ext}"
+            new_url = f"{self.api_base_url}/flow/uploadImage"
+
+            new_json_data = {
+                "clientContext": {
+                    "tool": "PINHOLE",
+                    "projectId": project_id  # <--- 新版接口必须要有这个
+                },
+                "fileName": upload_file_name,
+                "imageBytes": image_base64,
+                "isHidden": True,
+                "isUserUploaded": True,
+                "mimeType": mime_type
+            }
+
+            try:
+                # 纯后端 Python 请求上传，绝对不要走油猴！
+                new_result = await self._make_request(
+                    method="POST",
+                    url=new_url,
+                    json_data=new_json_data,
+                    use_at=True,
+                    at_token=at
+                )
+                media_id = (
+                        new_result.get("media", {}).get("name")
+                        or new_result.get("mediaGenerationId", {}).get("mediaGenerationId")
+                )
+                if media_id:
+                    return media_id
+            except Exception as new_upload_error:
+                debug_logger.log_warning(f"[UPLOAD] 新版上传接口失败, 降级至旧接口: {new_upload_error}")
+
+        # 兼容回退：旧接口 :uploadUserImage
+        legacy_url = f"{self.api_base_url}:uploadUserImage"
+        legacy_json_data = {
             "imageInput": {
                 "rawImageBytes": image_base64,
                 "mimeType": mime_type,
@@ -645,16 +674,18 @@ class FlowClient:
             }
         }
 
-        result = await self._make_request(
+        legacy_result = await self._make_request(
             method="POST",
-            url=url,
-            json_data=json_data,
+            url=legacy_url,
+            json_data=legacy_json_data,
             use_at=True,
             at_token=at
         )
 
-        # 返回mediaGenerationId
-        media_id = result["mediaGenerationId"]["mediaGenerationId"]
+        media_id = (
+                legacy_result.get("mediaGenerationId", {}).get("mediaGenerationId")
+                or legacy_result.get("media", {}).get("name")
+        )
         return media_id
 
     # ========== 图片生成 (使用AT) - 同步返回 ==========
@@ -715,17 +746,36 @@ class FlowClient:
             }
 
             request_data = {
-                "seed": random.randint(1, 99999),
+                "clientContext": client_context,
+                "seed": random.randint(1, 999999),
                 "imageModelName": model_name,
                 "imageAspectRatio": aspect_ratio,
-                "prompt": prompt,
+                "structuredPrompt": {
+                    "parts": [{
+                        "text": prompt
+                    }]
+                },
                 "imageInputs": image_inputs or []
             }
 
             json_data = {
                 "clientContext": client_context,
+                "mediaGenerationContext": {
+                    "batchId": str(uuid.uuid4())
+                },
+                "useNewMedia": True,
                 "requests": [request_data]
             }
+
+            # 关键诊断：仅对 3.1 Flash Image 打印一次核心请求摘要（不打印 token）
+            if model_name in ("GEM_PIX_3", "NARWHAL"):
+                print(
+                    "[IMAGE_DIAG] "
+                    f"model={model_name} | aspect={aspect_ratio} | "
+                    f"image_inputs={len(image_inputs or [])} | "
+                    f"req_keys={list(request_data.keys())} | "
+                    f"top_keys={list(json_data.keys())}"
+                )
 
             try:
                 # 关键分流逻辑

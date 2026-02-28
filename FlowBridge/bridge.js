@@ -136,9 +136,20 @@
 
                 addLog("🛡️ 正在请求 reCAPTCHA Token...");
                 const token = await grecaptcha.enterprise.execute('6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV', {action: task.action});
+                
+                // 1. 替换外层 Token
                 if (task.body?.clientContext?.recaptchaContext) {
                     task.body.clientContext.recaptchaContext.token = token;
                 }
+                // 2. 修复：遍历替换内层 requests 数组中的 Token (新版 Payload 必须)
+                if (task.body?.requests && Array.isArray(task.body.requests)) {
+                    task.body.requests.forEach(req => {
+                        if (req.clientContext?.recaptchaContext) {
+                            req.clientContext.recaptchaContext.token = token;
+                        }
+                    });
+                }
+                
                 addLog("✅ Token 获取成功");
             }
 

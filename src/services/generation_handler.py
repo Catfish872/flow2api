@@ -50,6 +50,95 @@ MODEL_CONFIG = {
         "model_name": "GEM_PIX_2",
         "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR"
     },
+"gemini-3.1-flash-image-landscape": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE"
+    },
+    "gemini-3.1-flash-image-portrait": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT"
+    },
+    "gemini-3.1-flash-image-square": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE"
+    },
+    "gemini-3.1-flash-image-four-three": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE"
+    },
+    "gemini-3.1-flash-image-three-four": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR"
+    },
+
+    # 图片生成 - Gemini 3.1 Flash 2K 放大版
+    "gemini-3.1-flash-image-landscape-2k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K"
+    },
+    "gemini-3.1-flash-image-portrait-2k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K"
+    },
+    "gemini-3.1-flash-image-square-2k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K"
+    },
+    "gemini-3.1-flash-image-four-three-2k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K"
+    },
+    "gemini-3.1-flash-image-three-four-2k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_2K"
+    },
+
+    # 图片生成 - Gemini 3.1 Flash 4K 放大版
+    "gemini-3.1-flash-image-landscape-4k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K"
+    },
+    "gemini-3.1-flash-image-portrait-4k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K"
+    },
+    "gemini-3.1-flash-image-square-4k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K"
+    },
+    "gemini-3.1-flash-image-four-three-4k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K"
+    },
+    "gemini-3.1-flash-image-three-four-4k": {
+        "type": "image",
+        "model_name": "NARWHAL",
+        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR",
+        "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K"
+    },
 
     # 图片生成 - GEM_PIX_2 (Gemini 3.0 Pro) 2K 放大版
     "gemini-3.0-pro-image-landscape-2k": {
@@ -809,7 +898,8 @@ class GenerationHandler:
                     media_id = await self.flow_client.upload_image(
                         token.at,
                         image_bytes,
-                        model_config["aspect_ratio"]
+                        model_config["aspect_ratio"],
+                        project_id=project_id  # <===== 致命修复：必须把 project_id 传进去！
                     )
                     image_inputs.append({
                         "name": media_id,
@@ -1071,7 +1161,7 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk("上传首帧图片...\n")
                     start_media_id = await self.flow_client.upload_image(
-                        token.at, images[0], model_config["aspect_ratio"]
+                        token.at, images[0], model_config["aspect_ratio"],project_id=project_id
                     )
                     debug_logger.log_info(f"[I2V] 仅上传首帧: {start_media_id}")
 
@@ -1080,10 +1170,10 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk("上传首帧和尾帧图片...\n")
                     start_media_id = await self.flow_client.upload_image(
-                        token.at, images[0], model_config["aspect_ratio"]
+                        token.at, images[0], model_config["aspect_ratio"],project_id=project_id
                     )
                     end_media_id = await self.flow_client.upload_image(
-                        token.at, images[1], model_config["aspect_ratio"]
+                        token.at, images[1], model_config["aspect_ratio"],project_id=project_id
                     )
                     debug_logger.log_info(f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}")
 
@@ -1094,7 +1184,7 @@ class GenerationHandler:
 
                 for idx, img in enumerate(images):  # 上传所有图片,不限制数量
                     media_id = await self.flow_client.upload_image(
-                        token.at, img, model_config["aspect_ratio"]
+                        token.at, img, model_config["aspect_ratio"],project_id=project_id
                     )
                     reference_images.append({
                         "imageUsageType": "IMAGE_USAGE_TYPE_ASSET",

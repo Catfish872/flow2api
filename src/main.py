@@ -22,6 +22,28 @@ import asyncio
 from threading import Timer
 import os
 import subprocess
+import logging
+
+
+class _UvicornAccessFilter(logging.Filter):
+    """过滤油猴桥接高频通信日志，避免控制台刷屏"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        blocked_keywords = [
+            '"GET /tm/task',
+            '"POST /tm/result',
+            '"OPTIONS /tm/result',
+            '/auth/callback'
+        ]
+        return not any(k in msg for k in blocked_keywords)
+
+
+def _setup_access_log_filter():
+    access_logger = logging.getLogger("uvicorn.access")
+    # 避免重复添加 filter
+    if not any(isinstance(f, _UvicornAccessFilter) for f in access_logger.filters):
+        access_logger.addFilter(_UvicornAccessFilter())
 
 
 async def auto_restart_edge_task():
@@ -99,6 +121,7 @@ async def lifespan(app: FastAPI):
     restart_task_handle = asyncio.create_task(auto_restart_edge_task())
     start_auto_open()
     # Startup
+    _setup_access_log_filter()
     print("=" * 60)
     print("Flow2API Starting...")
     print("=" * 60)
